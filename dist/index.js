@@ -17,29 +17,40 @@ const kafka = new kafkajs_1.Kafka({
     clientId: "outbox-processor",
     brokers: ["localhost:9092"],
 });
-function main() {
+function processOutbox() {
     return __awaiter(this, void 0, void 0, function* () {
         const producer = kafka.producer();
         yield producer.connect();
-        while (1) {
+        while (true) {
             const pendingRows = yield prisma.zapRunOutbox.findMany({
-                where: {},
+                where: {}, // you can add filters like `processedAt: null` if needed
                 take: 10,
             });
+            if (pendingRows.length === 0) {
+                // No messages to process, avoid hammering the DB
+                yield new Promise((r) => setTimeout(r, 1000));
+                continue;
+            }
             yield producer.send({
                 topic: TOPIC_NAME,
                 messages: pendingRows.map((r) => ({
+                    key: r.id.toString(), // optional, useful for ordering
                     value: r.zapRunId,
                 })),
             });
             yield prisma.zapRunOutbox.deleteMany({
                 where: {
                     id: {
-                        in: pendingRows.map((r) => r.id)
-                    }
+                        in: pendingRows.map((r) => r.id),
+                    },
                 },
             });
+            // Optional small delay to allow other processes to insert new rows
+            yield new Promise((r) => setTimeout(r, 100));
         }
     });
 }
-main();
+processOutbox().catch((err) => {
+    console.error("Outbox processor crashed", err);
+    process.exit(1);
+});
